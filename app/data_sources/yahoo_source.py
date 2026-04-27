@@ -8,17 +8,23 @@ Symbol conventions on Yahoo:
 
 Limits to be aware of (Yahoo's own, not yfinance's):
   - 1m candles: only the last 7 days
-  - All sub-daily intervals (<1d): only the last 60 days
+  - 2m..90m candles: only the last 60 days
+  - 1h candles: up to ~730 days
   - Daily and above: years of history
 
 We accept friendly forms ("EUR/USD", "EURUSD", "BTCUSDT") and translate to
 Yahoo's form. For "BTCUSDT" we strip the trailing "T" so it becomes BTC-USD.
+
+Yahoo doesn't natively offer 2h/4h/6h/8h/12h bars. For those timeframes we
+fetch 1h bars and resample, so users can run the same Ichimoku setups on
+forex/equities (Yahoo) that they run on crypto (Binance).
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Dict
+import re
+from typing import Dict, Optional
 
 import pandas as pd
 import yfinance as yf
@@ -28,8 +34,9 @@ from .base import DataSource
 log = logging.getLogger(__name__)
 
 
+# Timeframes Yahoo supports natively, mapped to yfinance's interval string.
 # yfinance accepted intervals: 1m 2m 5m 15m 30m 60m 90m 1h 1d 5d 1wk 1mo 3mo
-_TIMEFRAME_MAP: Dict[str, str] = {
+_NATIVE_TIMEFRAME_MAP: Dict[str, str] = {
     "1m": "1m",
     "5m": "5m",
     "15m": "15m",
@@ -39,6 +46,16 @@ _TIMEFRAME_MAP: Dict[str, str] = {
     "1w": "1wk",
 }
 
+# Timeframes we synthesize by resampling 1h bars. Values are pandas offset
+# aliases passed to DataFrame.resample().
+_RESAMPLE_FROM_1H: Dict[str, str] = {
+    "2h": "2h",
+    "4h": "4h",
+    "6h": "6h",
+    "8h": "8h",
+    "12h": "12h",
+}
+
 # How far back we ask for, per timeframe. Must be <= Yahoo's own limit.
 _PERIOD_FOR: Dict[str, str] = {
     "1m": "7d",
@@ -46,6 +63,13 @@ _PERIOD_FOR: Dict[str, str] = {
     "15m": "60d",
     "30m": "60d",
     "1h": "60d",   # ~1440 hourly bars -- plenty for Ichimoku
+    # Synthetic multi-hour timeframes pull 1h bars then resample. Yahoo allows
+    # 1h up to ~730 days, which yields plenty of bars even for 12h.
+    "2h": "730d",
+    "4h": "730d",
+    "6h": "730d",
+    "8h": "730d",
+    "12h": "730d",
     "1d": "2y",
     "1w": "10y",
 }
@@ -83,14 +107,15 @@ class YahooSource(DataSource):
     name = "yahoo"
 
     def fetch_ohlc(self, symbol: str, timeframe: str, limit: int = 200) -> pd.DataFrame:
-        if timeframe not in _TIMEFRAME_MAP:
-            raise ValueError(f"Unsupported timeframe for Yahoo: {timeframe}")
+        interval, resample_rule = _resolve_timeframe(timeframe)
 
         ticker = _to_yahoo_symbol(symbol)
-        interval = _TIMEFRAME_MAP[timeframe]
         period = _PERIOD_FOR[timeframe]
 
-        log.debug("Yahoo download: %s interval=%s period=%s", ticker, interval, period)
+        log.debug(
+            "Yahoo download: %s interval=%s period=%s resample=%s",
+            ticker, interval, period, resample_rule,
+        )
 
         df = yf.download(
             tickers=ticker,
@@ -135,20 +160,51 @@ class YahooSource(DataSource):
         df = df.dropna(subset=["open", "high", "low", "close"])
         df = df.sort_index()
 
+        if resample_rule is not None:
+            df = _resample_ohlc(df, resample_rule)
+
         # Drop the still-forming bar if its timestamp looks too recent.
         if len(df) > 0:
             last_ts = df.index[-1]
             now = pd.Timestamp.now(tz="UTC")
-            interval_seconds = _interval_seconds(timeframe)
-            if (now - last_ts).total_seconds() < interval_seconds:
+            if (now - last_ts).total_seconds() < _interval_seconds(timeframe):
                 df = df.iloc[:-1]
 
         return df.tail(limit)
 
 
-def _interval_seconds(timeframe: str) -> int:
-    table = {
-        "1m": 60, "5m": 300, "15m": 900, "30m": 1800,
-        "1h": 3600, "1d": 86400, "1w": 604800,
+def _resolve_timeframe(timeframe: str) -> tuple[str, Optional[str]]:
+    """Return (yfinance interval, resample rule or None) for a requested tf."""
+    if timeframe in _NATIVE_TIMEFRAME_MAP:
+        return _NATIVE_TIMEFRAME_MAP[timeframe], None
+    if timeframe in _RESAMPLE_FROM_1H:
+        return "60m", _RESAMPLE_FROM_1H[timeframe]
+    raise ValueError(f"Unsupported timeframe for Yahoo: {timeframe}")
+
+
+def _resample_ohlc(df: pd.DataFrame, rule: str) -> pd.DataFrame:
+    """Aggregate finer-grained OHLC bars into the requested rule (e.g. '4h')."""
+    agg: Dict[str, str] = {
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
     }
-    return table[timeframe]
+    if "volume" in df.columns:
+        agg["volume"] = "sum"
+
+    # label/closed='left' makes the bar timestamp mark the open time, which
+    # is the convention used by Binance and by the rest of this codebase.
+    out = df.resample(rule, label="left", closed="left").agg(agg)
+    return out.dropna(subset=["open", "high", "low", "close"])
+
+
+_INTERVAL_RE = re.compile(r"^(\d+)([mhdw])$")
+_UNIT_SECONDS = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+
+def _interval_seconds(timeframe: str) -> int:
+    m = _INTERVAL_RE.match(timeframe)
+    if not m:
+        raise ValueError(f"Cannot parse timeframe: {timeframe}")
+    return int(m.group(1)) * _UNIT_SECONDS[m.group(2)]
