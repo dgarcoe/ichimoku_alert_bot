@@ -1,0 +1,28 @@
+services:
+  ichimoku-bot:
+    build: .
+    image: ichimoku-bot:latest
+    container_name: ichimoku-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Override at runtime if desired
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      TZ: ${TZ:-Europe/Madrid}
+      CONFIG_PATH: /app/config/config.yml
+    volumes:
+      # Mount the config so you can edit symbols without rebuilding the image
+      - ./config:/app/config:ro
+      # Persist alert dedup state across restarts
+      - ichimoku-state:/data
+    # Healthcheck: process is alive
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "app.main"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  ichimoku-state:
