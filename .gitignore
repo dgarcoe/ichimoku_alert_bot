@@ -5,6 +5,7 @@ __pycache__/
 venv/
 .env
 data/
+config/config.yml
 .idea/
 .vscode/
 *.log
