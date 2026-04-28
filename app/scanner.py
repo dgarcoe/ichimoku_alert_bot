@@ -6,11 +6,14 @@ import logging
 from html import escape
 from typing import Dict
 
+import pandas as pd
+
 from .config import AppConfig, SymbolConfig
 from .data_sources import BinanceSource, DataSource, YahooSource
 from .notifiers import TelegramNotifier
 from .state import SeenStore
 from .strategies import Signal, compute_ichimoku, detect_signal
+from .timeframes import interval_seconds
 
 log = logging.getLogger(__name__)
 
@@ -99,6 +102,21 @@ def scan_once(
             key = seen_key(sym, signal)
             if seen.contains(key):
                 log.debug("Already alerted for %s", key)
+                continue
+
+            # Only alert on freshly-closed bars. signal.bar_time is the bar's
+            # open time; the close happens one interval later. This stops the
+            # bot from sending stale alerts after a restart.
+            bar_close = signal.bar_time + pd.Timedelta(
+                seconds=interval_seconds(sym.timeframe)
+            )
+            age = (pd.Timestamp.now(tz="UTC") - bar_close).total_seconds()
+            if age > cfg.max_signal_age_seconds:
+                log.info(
+                    "Stale signal for %s %s: bar closed %.0fs ago (limit %ds); skipping",
+                    sym.symbol, sym.timeframe, age, cfg.max_signal_age_seconds,
+                )
+                seen.add(key)
                 continue
 
             msg = format_signal_message(sym, signal)
