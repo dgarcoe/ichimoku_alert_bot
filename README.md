@@ -160,6 +160,7 @@ All in `config/config.yml`:
 | `scan.cross_lookback_bars` | How far back to look for the qualifying T/K cross. 60 is comfortable. Lower it (e.g. 30) to only catch very recent crosses. |
 | `scan.history_bars` | How many closed bars to fetch per scan. Must exceed `senkou_b + displacement` by a healthy margin. 200 is safe. |
 | `scan.poll_interval_seconds` | How often to re-scan the whole watchlist. For a 1d timeframe, 1800 or 3600 is plenty. For 1h, 300 is typical. |
+| `scan.max_signal_age_seconds` | Skip alerts whose bar closed more than this many seconds ago. Prevents stale notifications after a (re)start — e.g. on 4h with the default 600s, a signal on a bar that closed at 04:00 won't fire if the bot wakes up at 06:22. Defaults to `2 × poll_interval_seconds`. |
 
 ## Running the tests
 

@@ -51,6 +51,10 @@ class AppConfig:
     ichimoku_displacement: int
     cross_lookback_bars: int
     history_bars: int
+    # Drop signals whose bar closed more than this many seconds ago. This
+    # prevents alerting on stale signals after a (re)start, where the bot
+    # would otherwise notify for a bar that closed hours earlier.
+    max_signal_age_seconds: int
     symbols: List[SymbolConfig] = field(default_factory=list)
     state_path: str = "/data/seen_signals.json"
     startup_message: bool = True
@@ -82,16 +86,23 @@ def load_config(path: str) -> AppConfig:
         for item in raw.get("symbols", [])
     ]
 
+    poll_interval_seconds = int(scan.get("poll_interval_seconds", 300))
+    max_age = scan.get("max_signal_age_seconds")
+    max_signal_age_seconds = (
+        int(max_age) if max_age is not None else 2 * poll_interval_seconds
+    )
+
     return AppConfig(
         telegram_bot_token=tg.get("bot_token", "") or "",
         telegram_chat_ids=chat_ids,
-        poll_interval_seconds=int(scan.get("poll_interval_seconds", 300)),
+        poll_interval_seconds=poll_interval_seconds,
         ichimoku_tenkan=int(ichimoku.get("tenkan", 9)),
         ichimoku_kijun=int(ichimoku.get("kijun", 26)),
         ichimoku_senkou_b=int(ichimoku.get("senkou_b", 52)),
         ichimoku_displacement=int(ichimoku.get("displacement", 26)),
         cross_lookback_bars=int(scan.get("cross_lookback_bars", 60)),
         history_bars=int(scan.get("history_bars", 200)),
+        max_signal_age_seconds=max_signal_age_seconds,
         symbols=symbols,
         state_path=raw.get("state_path", "/data/seen_signals.json"),
         startup_message=bool(raw.get("startup_message", True)),

@@ -23,12 +23,12 @@ forex/equities (Yahoo) that they run on crypto (Binance).
 from __future__ import annotations
 
 import logging
-import re
 from typing import Dict, Optional
 
 import pandas as pd
 import yfinance as yf
 
+from ..timeframes import interval_seconds
 from .base import DataSource
 
 log = logging.getLogger(__name__)
@@ -167,7 +167,7 @@ class YahooSource(DataSource):
         if len(df) > 0:
             last_ts = df.index[-1]
             now = pd.Timestamp.now(tz="UTC")
-            if (now - last_ts).total_seconds() < _interval_seconds(timeframe):
+            if (now - last_ts).total_seconds() < interval_seconds(timeframe):
                 df = df.iloc[:-1]
 
         return df.tail(limit)
@@ -199,12 +199,3 @@ def _resample_ohlc(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     return out.dropna(subset=["open", "high", "low", "close"])
 
 
-_INTERVAL_RE = re.compile(r"^(\d+)([mhdw])$")
-_UNIT_SECONDS = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
-
-
-def _interval_seconds(timeframe: str) -> int:
-    m = _INTERVAL_RE.match(timeframe)
-    if not m:
-        raise ValueError(f"Cannot parse timeframe: {timeframe}")
-    return int(m.group(1)) * _UNIT_SECONDS[m.group(2)]
