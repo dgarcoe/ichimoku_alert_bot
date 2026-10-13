@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from html import escape
 import logging
 import os
 import signal
@@ -19,6 +20,8 @@ from .state import SeenStore
 def _configure_logging() -> None:
     level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.basicConfig(
         level=level,
         format="%(asctime)s  %(levelname)-7s  %(name)s  %(message)s",
@@ -41,6 +44,8 @@ def main() -> int:
         action="store_true",
         help="Run a single scan and exit (useful for debugging)",
     )
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Evaluate signals without sending Telegram or saving state")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -49,14 +54,14 @@ def main() -> int:
         len(cfg.symbols), cfg.poll_interval_seconds, cfg.state_path,
     )
 
-    if not cfg.telegram_bot_token or not cfg.telegram_chat_ids:
+    if not args.dry_run and (not cfg.telegram_bot_token or not cfg.telegram_chat_ids):
         log.error("Telegram bot_token and at least one chat_id are required.")
         return 2
     if not cfg.symbols:
         log.error("No symbols configured; nothing to do.")
         return 2
 
-    notifier = TelegramNotifier(
+    notifier = None if args.dry_run else TelegramNotifier(
         bot_token=cfg.telegram_bot_token,
         chat_ids=cfg.telegram_chat_ids,
     )
@@ -72,9 +77,9 @@ def main() -> int:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
-    if cfg.startup_message:
+    if cfg.startup_message and not args.dry_run:
         symbol_lines = "\n".join(
-            f"• {s.display} ({s.source}, {s.timeframe})" for s in cfg.symbols
+            f"• {escape(s.display)} ({escape(s.source)}, {escape(s.timeframe)})" for s in cfg.symbols
         )
         notifier.send(
             "<b>🔔 Ichimoku bot is up</b>\n"
@@ -85,7 +90,7 @@ def main() -> int:
     while not stop.is_set():
         started = time.monotonic()
         try:
-            scan_once(cfg, sources, notifier, seen)
+            scan_once(cfg, sources, notifier, seen, dry_run=args.dry_run)
         except Exception as exc:  # noqa: BLE001
             log.exception("Unhandled scan error: %s", exc)
 

@@ -46,6 +46,9 @@ class BinanceSource(DataSource):
         if timeframe not in _TIMEFRAME_MAP:
             raise ValueError(f"Unsupported timeframe for Binance: {timeframe}")
 
+        if not 1 <= limit <= 999:
+            raise ValueError("Binance limit must be between 1 and 999")
+
         # Binance uses symbols like "BTCUSDT" (no separator). Accept "BTC/USDT" too.
         sym = symbol.replace("/", "").replace("-", "").upper()
 
@@ -81,12 +84,10 @@ class BinanceSource(DataSource):
         for col in ("open", "high", "low", "close", "volume"):
             df[col] = df[col].astype(float)
 
+        # Use provider close timestamps; don't discard a fully closed last bar.
+        now_ms = pd.Timestamp.now(tz="UTC").value // 1_000_000
+        df = df[pd.to_numeric(df["close_time"]) < now_ms]
         df = df.set_index("timestamp")[["open", "high", "low", "close", "volume"]]
         df = df.sort_index()
-
-        # Drop the still-forming candle. Binance includes it if we're inside
-        # the interval; the safest thing is always to drop the last bar.
-        if len(df) > 0:
-            df = df.iloc[:-1]
 
         return df.tail(limit)

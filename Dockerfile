@@ -19,7 +19,7 @@ RUN pip install -r /app/requirements.txt
 
 # Then app code
 COPY app /app/app
-COPY config /app/config
+COPY config/config.example.yml /app/config/config.yml
 
 # Run as a non-root user; ensure /data exists and is writable
 RUN useradd --create-home --shell /usr/sbin/nologin --uid 10001 ichi \

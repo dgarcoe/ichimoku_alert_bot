@@ -1,0 +1,26 @@
+telegram:
+  bot_token: ${TELEGRAM_BOT_TOKEN}
+  chat_ids: ${TELEGRAM_CHAT_IDS}
+ichimoku:
+  tenkan: 9
+  kijun: 26
+  senkou_b: 52
+  displacement: 26
+scan:
+  poll_interval_seconds: 60
+  history_bars: 250
+  cross_lookback_bars: 60
+  max_signal_age_seconds: 600
+strategy:
+  min_breakout_atr: 0.0
+  stop_buffer_atr: 0.0
+  max_stop_pct: 0.0
+  max_kijun_distance_atr: 0.0
+  require_price_outside_cloud: false
+  require_projected_cloud: false
+state_path: /data/seen_signals.json
+startup_message: true
+symbols:
+  - {symbol: BTCUSDT, source: binance, timeframe: 1h}
+  - {symbol: ETHUSDT, source: binance, timeframe: 4h}
+  - {symbol: EURUSD=X, source: yahoo, timeframe: 1h}

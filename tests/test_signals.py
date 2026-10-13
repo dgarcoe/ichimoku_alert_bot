@@ -22,6 +22,8 @@ def _make_ohlc(closes: list[float], start: str = "2024-01-01") -> pd.DataFrame:
     high = close + np.maximum(np.abs(close) * 0.001, 0.01)
     low = close - np.maximum(np.abs(close) * 0.001, 0.01)
     open_ = np.concatenate([[close[0]], close[:-1]])
+    high = np.maximum(high, open_)
+    low = np.minimum(low, open_)
     return pd.DataFrame(
         {"open": open_, "high": high, "low": low, "close": close, "volume": 0.0},
         index=idx,
@@ -40,7 +42,7 @@ def test_long_setup_fires_on_chikou_breakout():
     rng = np.random.default_rng(42)
 
     # Phase 1: downtrend from 100 -> 60 over 60 bars.
-    down = np.linspace(100.0, 60.0, 60) + rng.normal(0, 0.2, 60)
+    down = np.linspace(140.0, 60.0, 110) + rng.normal(0, 0.2, 110)
 
     # Phase 2: base / small rise from 60 -> 64 over 15 bars (T/K cross happens here).
     base = np.linspace(60.0, 64.0, 15) + rng.normal(0, 0.2, 15)

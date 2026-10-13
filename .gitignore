@@ -9,3 +9,5 @@ config/config.yml
 .idea/
 .vscode/
 *.log
+
+.pytest_cache/

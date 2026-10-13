@@ -59,133 +59,107 @@ class Signal:
         }
 
 
-def _last_cross_index(
-    df: pd.DataFrame, up_to: int, side: SignalSide, max_lookback: int
-) -> Optional[int]:
+@dataclass(frozen=True)
+class StrategyOptions:
+    # Optional filters are disabled until validated on out-of-sample data.
+    min_breakout_atr: float = 0.0
+    stop_buffer_atr: float = 0.0
+    max_stop_pct: float = 0.0
+    max_kijun_distance_atr: float = 0.0
+    require_price_outside_cloud: bool = False
+    require_projected_cloud: bool = False
+
+    def __post_init__(self):
+        import math
+        for name in ("min_breakout_atr", "stop_buffer_atr", "max_stop_pct",
+                     "max_kijun_distance_atr"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and nonnegative")
+        for name in ("require_price_outside_cloud", "require_projected_cloud"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be boolean")
+
+
+def detect_signal(df: pd.DataFrame, displacement: int = 26,
+                  cross_lookback: int = 60,
+                  options: Optional[StrategyOptions] = None) -> Optional[Signal]:
+    """First Chikou breakout AFTER a still-active reversal cross, closed bars only.
+
+    Equality in T/K invalidates the setup; a new directional cross may rearm it.
+    The first breakout consumes the setup even if optional entry filters reject it.
+    All comparisons use only present/past data; no plotted future Chikou column.
     """
-    Find the most recent Tenkan/Kijun cross before (or at) index `up_to`.
-
-    For 'long'  we want a bullish cross: tenkan crosses above kijun.
-    For 'short' we want a bearish cross: tenkan crosses below kijun.
-
-    Returns the integer index of the cross bar, or None if not found within
-    max_lookback bars.
-    """
-    tenkan = df["tenkan"].to_numpy()
-    kijun = df["kijun"].to_numpy()
-
-    start = max(1, up_to - max_lookback)
-    for i in range(up_to, start - 1, -1):
-        prev_diff = tenkan[i - 1] - kijun[i - 1]
-        curr_diff = tenkan[i] - kijun[i]
-        if pd.isna(prev_diff) or pd.isna(curr_diff):
-            continue
-        if side == "long" and prev_diff <= 0 and curr_diff > 0:
-            return i
-        if side == "short" and prev_diff >= 0 and curr_diff < 0:
-            return i
-    return None
-
-
-def detect_signal(
-    df: pd.DataFrame,
-    displacement: int = 26,
-    cross_lookback: int = 60,
-) -> Optional[Signal]:
-    """
-    Look at the most recently *closed* bar and decide whether it is a Chikou
-    Span Breakout entry bar following a qualifying Tenkan/Kijun cross.
-
-    Parameters
-    ----------
-    df : DataFrame with OHLC + Ichimoku columns, ascending by time.
-         The caller is responsible for passing only CLOSED bars.
-    displacement : Ichimoku displacement (default 26).
-    cross_lookback : how many bars back to look for the qualifying cross.
-
-    Returns
-    -------
-    Signal if the latest bar is a fresh entry; otherwise None.
-    """
-    # We need at least displacement + 1 bars so the Chikou at the latest bar
-    # has a past candle to be compared against.
+    import math
+    if displacement <= 0 or cross_lookback <= 0:
+        raise ValueError("displacement and cross_lookback must be positive")
+    options = options or StrategyOptions()
     if len(df) < displacement + 2:
         return None
-
-    i = len(df) - 1  # index of the most recent closed bar
-
-    # Chikou at chart position (i - displacement) equals close[i].
-    chikou_now = df["close"].iloc[i]
-    past_idx = i - displacement
-    if past_idx < 1:
+    i = len(df) - 1
+    row = df.iloc[i]
+    required = ("close", "tenkan", "kijun", "kumo_top", "kumo_bottom")
+    if not all(math.isfinite(row[c]) for c in required):
         return None
-
-    past_high = df["high"].iloc[past_idx]
-    past_low = df["low"].iloc[past_idx]
-    prev_past_idx = past_idx - 1
-    prev_past_high = df["high"].iloc[prev_past_idx]
-    prev_past_low = df["low"].iloc[prev_past_idx]
-
-    # Previous bar's Chikou (close[i-1] projected to past_idx - 1).
-    chikou_prev = df["close"].iloc[i - 1]
-
-    kumo_top = df["kumo_top"].iloc[i]
-    kumo_bottom = df["kumo_bottom"].iloc[i]
-    tenkan = df["tenkan"].iloc[i]
-    kijun = df["kijun"].iloc[i]
-    close_now = df["close"].iloc[i]
-
-    if any(pd.isna(x) for x in (kumo_top, kumo_bottom, tenkan, kijun)):
+    diff = df.tenkan - df.kijun
+    direction = 1 if diff.iloc[i] > 0 else -1 if diff.iloc[i] < 0 else 0
+    if not direction:
         return None
-
-    # ---------- LONG ----------
-    # Chikou crosses above the past candle's high on this bar.
-    bullish_break = chikou_prev <= prev_past_high and chikou_now > past_high
-    if bullish_break:
-        cross_i = _last_cross_index(df, i, side="long", max_lookback=cross_lookback)
-        if cross_i is not None:
-            cross_close = df["close"].iloc[cross_i]
-            cross_kumo_top = df["kumo_top"].iloc[cross_i]
-            # Per the video: the qualifying cross happens BELOW the Kumo so
-            # we are catching a reversal from a downtrend.
-            if pd.notna(cross_kumo_top) and cross_close < cross_kumo_top:
-                swing_low = df["low"].iloc[cross_i : i + 1].min()
-                stop = min(kijun, swing_low)
-                return Signal(
-                    side="long",
-                    bar_time=df.index[i],
-                    entry_price=float(close_now),
-                    stop_loss=float(stop),
-                    tenkan=float(tenkan),
-                    kijun=float(kijun),
-                    kumo_top=float(kumo_top),
-                    kumo_bottom=float(kumo_bottom),
-                    chikou_breakout_delta=float(chikou_now - past_high),
-                    cross_bar_time=df.index[cross_i],
-                )
-
-    # ---------- SHORT ----------
-    bearish_break = chikou_prev >= prev_past_low and chikou_now < past_low
-    if bearish_break:
-        cross_i = _last_cross_index(df, i, side="short", max_lookback=cross_lookback)
-        if cross_i is not None:
-            cross_close = df["close"].iloc[cross_i]
-            cross_kumo_bottom = df["kumo_bottom"].iloc[cross_i]
-            # Mirror: qualifying bearish cross happens ABOVE the Kumo.
-            if pd.notna(cross_kumo_bottom) and cross_close > cross_kumo_bottom:
-                swing_high = df["high"].iloc[cross_i : i + 1].max()
-                stop = max(kijun, swing_high)
-                return Signal(
-                    side="short",
-                    bar_time=df.index[i],
-                    entry_price=float(close_now),
-                    stop_loss=float(stop),
-                    tenkan=float(tenkan),
-                    kijun=float(kijun),
-                    kumo_top=float(kumo_top),
-                    kumo_bottom=float(kumo_bottom),
-                    chikou_breakout_delta=float(past_low - chikou_now),
-                    cross_bar_time=df.index[cross_i],
-                )
-
-    return None
+    # Find the start of the current uninterrupted directional regime.
+    cross_i = None
+    for j in range(i, max(1, i-cross_lookback)-1, -1):
+        if not math.isfinite(diff.iloc[j-1]):
+            return None
+        if direction * diff.iloc[j-1] <= 0:
+            cross_i = j
+            break
+    if cross_i is None or cross_i == i or cross_i < displacement:
+        return None
+    cross = df.iloc[cross_i]
+    if not all(math.isfinite(cross[c]) for c in required):
+        return None
+    # Strictly BELOW the whole cloud for long; ABOVE the whole cloud for short.
+    if direction == 1 and not cross.close < cross.kumo_bottom:
+        return None
+    if direction == -1 and not cross.close > cross.kumo_top:
+        return None
+    reference = df.high if direction == 1 else df.low
+    def clearance(j):
+        return direction * (df.close.iloc[j] - reference.iloc[j-displacement])
+    if not (clearance(i-1) <= 0 < clearance(i)):
+        return None
+    # One opportunity per setup (also deterministic across process restarts).
+    if any(clearance(j-1) <= 0 < clearance(j) for j in range(cross_i+1, i)):
+        return None
+    atr = row.get("atr", float("nan"))
+    if any((options.min_breakout_atr, options.stop_buffer_atr,
+            options.max_kijun_distance_atr)) and (not math.isfinite(atr) or atr <= 0):
+        return None
+    if options.min_breakout_atr and clearance(i) < options.min_breakout_atr * atr:
+        return None
+    if options.max_kijun_distance_atr and abs(row.close-row.kijun) > options.max_kijun_distance_atr * atr:
+        return None
+    if options.require_price_outside_cloud:
+        boundary = row.kumo_top if direction == 1 else row.kumo_bottom
+        if direction * (row.close-boundary) <= 0:
+            return None
+    if options.require_projected_cloud:
+        a, b = row.get("projected_senkou_a"), row.get("projected_senkou_b")
+        if a is None or b is None or not math.isfinite(a+b) or direction*(a-b) <= 0:
+            return None
+    swing = df.iloc[cross_i:i+1]
+    stop = min(row.kijun, swing.low.min()) if direction == 1 else max(row.kijun, swing.high.max())
+    if options.stop_buffer_atr:
+        stop -= direction * options.stop_buffer_atr * atr
+    risk = direction * (row.close-stop)
+    if not math.isfinite(stop) or stop <= 0 or risk <= 0:
+        return None
+    if options.max_stop_pct and risk / row.close * 100 > options.max_stop_pct:
+        return None
+    return Signal(
+        side="long" if direction == 1 else "short", bar_time=df.index[i],
+        entry_price=float(row.close), stop_loss=float(stop),
+        tenkan=float(row.tenkan), kijun=float(row.kijun),
+        kumo_top=float(row.kumo_top), kumo_bottom=float(row.kumo_bottom),
+        chikou_breakout_delta=float(clearance(i)), cross_bar_time=df.index[cross_i],
+    )
