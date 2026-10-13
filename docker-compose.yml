@@ -18,7 +18,7 @@ services:
       - ichimoku-state:/data
     # Healthcheck: process is alive
     healthcheck:
-      test: ["CMD", "pgrep", "-f", "app.main"]
+      test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
       interval: 30s
       timeout: 5s
       retries: 3

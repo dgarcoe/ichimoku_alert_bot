@@ -14,6 +14,7 @@ from .notifiers import TelegramNotifier
 from .state import SeenStore
 from .strategies import Signal, compute_ichimoku, detect_signal
 from .timeframes import interval_seconds
+from .market_data import validate_ohlc
 
 log = logging.getLogger(__name__)
 
@@ -37,14 +38,13 @@ def format_signal_message(sym: SymbolConfig, signal: Signal) -> str:
         f"• Timeframe: <code>{escape(sym.timeframe)}</code>",
         f"• Source: <code>{escape(sym.source)}</code>",
         f"• Bar: <code>{escape(signal.bar_time.isoformat())}</code>",
-        f"• Entry: <code>{signal.entry_price:g}</code>",
-        f"• Stop:  <code>{signal.stop_loss:g}</code>  (risk ≈ {risk_pct:.2f}%)",
+        f"• Signal close (not execution): <code>{signal.entry_price:g}</code>",
+        f"• Stop:  <code>{signal.stop_loss:g}</code>  (price distance ≈ {risk_pct:.2f}%)",
         f"• Tenkan: <code>{signal.tenkan:g}</code>  |  Kijun: <code>{signal.kijun:g}</code>",
         f"• Kumo: <code>{signal.kumo_bottom:g}</code> → <code>{signal.kumo_top:g}</code>",
         f"• Qualifying T/K cross: <code>{escape(signal.cross_bar_time.isoformat())}</code>",
         "",
-        "<i>Targets: next S/R or opposite side of higher-TF Kumo. "
-        "Trail with Kijun-sen.</i>",
+        "<i>Alert only; no execution, target or higher-timeframe confirmation.</i>",
     ]
     return "\n".join(parts)
 
@@ -56,8 +56,9 @@ def seen_key(sym: SymbolConfig, signal: Signal) -> str:
 def scan_once(
     cfg: AppConfig,
     sources: Dict[str, DataSource],
-    notifier: TelegramNotifier,
+    notifier: TelegramNotifier | None,
     seen: SeenStore,
+    dry_run: bool = False,
 ) -> None:
     for sym in cfg.symbols:
         try:
@@ -74,6 +75,10 @@ def scan_once(
                 timeframe=sym.timeframe,
                 limit=cfg.history_bars,
             )
+            if df.empty:
+                log.info("No data for %s %s", sym.symbol, sym.timeframe)
+                continue
+            validate_ohlc(df)
             min_needed = cfg.ichimoku_senkou_b + cfg.ichimoku_displacement + 5
             if len(df) < min_needed:
                 log.info(
@@ -94,6 +99,7 @@ def scan_once(
                 df,
                 displacement=cfg.ichimoku_displacement,
                 cross_lookback=cfg.cross_lookback_bars,
+                options=cfg.strategy,
             )
             if signal is None:
                 log.debug("%s %s: no signal", sym.symbol, sym.timeframe)
@@ -111,16 +117,32 @@ def scan_once(
                 seconds=interval_seconds(sym.timeframe)
             )
             age = (pd.Timestamp.now(tz="UTC") - bar_close).total_seconds()
+            if age < 0:
+                log.warning("Future/unclosed signal rejected for %s", sym.symbol)
+                continue
             if age > cfg.max_signal_age_seconds:
                 log.info(
                     "Stale signal for %s %s: bar closed %.0fs ago (limit %ds); skipping",
                     sym.symbol, sym.timeframe, age, cfg.max_signal_age_seconds,
                 )
-                seen.add(key)
+                if not dry_run:
+                    seen.add(key)
                 continue
 
+            if dry_run:
+                log.info("DRY RUN %s %s: %s", sym.symbol, sym.timeframe, signal.as_dict())
+                continue
             msg = format_signal_message(sym, signal)
-            notifier.send(msg)
+            if notifier is None:
+                raise ValueError("Notifier required outside dry-run")
+            pending = [chat for chat in notifier.chat_ids
+                       if not seen.contains(f"{key}:chat:{chat}")]
+            delivered = notifier.send(msg, chat_ids=pending)
+            for chat in delivered:
+                seen.add(f"{key}:chat:{chat}")
+            if len(delivered) != len(pending):
+                log.warning("Incomplete delivery for %s; retry on next poll", key)
+                continue
             seen.add(key)
             log.info(
                 "Signal sent: %s %s %s @ %s bar=%s",

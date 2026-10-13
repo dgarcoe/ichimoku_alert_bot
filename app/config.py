@@ -9,6 +9,9 @@ from typing import List, Optional
 
 import yaml
 
+from .strategies.signals import StrategyOptions
+from .timeframes import interval_seconds
+
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)(?::-([^}]*))?\}")
 
@@ -58,6 +61,31 @@ class AppConfig:
     symbols: List[SymbolConfig] = field(default_factory=list)
     state_path: str = "/data/seen_signals.json"
     startup_message: bool = True
+    strategy: StrategyOptions = field(default_factory=StrategyOptions)
+
+    def __post_init__(self):
+        for name in ("poll_interval_seconds", "ichimoku_tenkan", "ichimoku_kijun",
+                     "ichimoku_senkou_b", "ichimoku_displacement", "cross_lookback_bars",
+                     "history_bars", "max_signal_age_seconds"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be positive")
+        minimum = max(self.ichimoku_tenkan, self.ichimoku_kijun,
+                      self.ichimoku_senkou_b) + self.ichimoku_displacement + self.cross_lookback_bars + 1
+        if self.history_bars < minimum:
+            raise ValueError(f"history_bars must be >= {minimum} for full cross lookback")
+        from .data_sources.binance_source import _TIMEFRAME_MAP
+        from .data_sources.yahoo_source import _resolve_timeframe
+        for sym in self.symbols:
+            interval_seconds(sym.timeframe)
+            if not sym.symbol.strip():
+                raise ValueError("Empty symbol")
+            if sym.source == "binance":
+                if sym.timeframe not in _TIMEFRAME_MAP or self.history_bars > 999:
+                    raise ValueError("Unsupported Binance timeframe or history_bars > 999")
+            elif sym.source == "yahoo":
+                _resolve_timeframe(sym.timeframe)
+            else:
+                raise ValueError(f"Unknown source: {sym.source}")
 
 
 def load_config(path: str) -> AppConfig:
@@ -65,6 +93,10 @@ def load_config(path: str) -> AppConfig:
         raw = yaml.safe_load(f) or {}
 
     raw = _expand_env(raw)
+    if not isinstance(raw, dict):
+        raise ValueError("Configuration must be a mapping")
+    if not isinstance(raw.get("startup_message", True), bool):
+        raise ValueError("startup_message must be boolean")
 
     tg = raw.get("telegram", {})
     ichimoku = raw.get("ichimoku", {})
@@ -105,5 +137,6 @@ def load_config(path: str) -> AppConfig:
         max_signal_age_seconds=max_signal_age_seconds,
         symbols=symbols,
         state_path=raw.get("state_path", "/data/seen_signals.json"),
-        startup_message=bool(raw.get("startup_message", True)),
+        startup_message=raw.get("startup_message", True),
+        strategy=StrategyOptions(**raw.get("strategy", {})),
     )

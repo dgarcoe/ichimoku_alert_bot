@@ -31,12 +31,17 @@ class TelegramNotifier:
         self._timeout = timeout
         self._base = f"https://api.telegram.org/bot{bot_token}"
 
-    def send(self, text: str) -> None:
+    @property
+    def chat_ids(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(self._chat_ids))
+
+    def send(self, text: str, chat_ids=None) -> set[str]:
         if not self._chat_ids:
             log.warning("No chat IDs configured; dropping message.")
-            return
+            return set()
+        delivered = set()
         with httpx.Client(timeout=self._timeout) as client:
-            for chat_id in self._chat_ids:
+            for chat_id in (self.chat_ids if chat_ids is None else chat_ids):
                 try:
                     resp = client.post(
                         f"{self._base}/sendMessage",
@@ -47,10 +52,12 @@ class TelegramNotifier:
                             "disable_web_page_preview": True,
                         },
                     )
-                    if resp.status_code >= 400:
-                        log.error(
-                            "Telegram sendMessage failed (chat=%s) %s: %s",
-                            chat_id, resp.status_code, resp.text,
-                        )
-                except httpx.HTTPError as exc:
-                    log.exception("Telegram request error: %s", exc)
+                    # Never log response bodies or HTTP exception URLs: they may
+                    # contain the bot token or user content.
+                    if resp.status_code == 200 and resp.json().get("ok") is True:
+                        delivered.add(chat_id)
+                    else:
+                        log.warning("Telegram delivery failed: HTTP %s", resp.status_code)
+                except (httpx.HTTPError, ValueError):
+                    log.warning("Telegram delivery failed: transport or invalid response")
+        return delivered

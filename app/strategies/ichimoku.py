@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from ..market_data import validate_ohlc
+
 
 def compute_ichimoku(
     df: pd.DataFrame,
@@ -30,8 +32,14 @@ def compute_ichimoku(
 
     Returns a copy of df with added columns:
         tenkan, kijun, senkou_a, senkou_b, chikou,
-        kumo_top, kumo_bottom, price_above_kumo, price_below_kumo
+        kumo_top, kumo_bottom, price_above_kumo, price_below_kumo,
+        projected_senkou_a/b, chikou_reference_high/low, atr.
+    `chikou` is the causal current close; plot it at index-displacement.
     """
+    validate_ohlc(df)
+    for value in (tenkan_period, kijun_period, senkou_b_period, displacement):
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError("Ichimoku periods must be positive integers")
     out = df.copy()
 
     high = out["high"]
@@ -62,15 +70,29 @@ def compute_ichimoku(
         / 2
     ).shift(displacement)
 
-    # Chikou Span (Lagging Span) -- close plotted `displacement` periods behind.
-    # We shift(-displacement) so that row i contains the close that will be
-    # "at" position i - displacement on the chart (i.e. the chikou value whose
-    # chart-x is `i - displacement` lives at dataframe index `i`).
-    out["chikou"] = close.shift(-displacement)
+    # Causal features only: projected cloud is known now, plotted ahead.
+    out["projected_senkou_a"] = (out["tenkan"] + out["kijun"]) / 2
+    out["projected_senkou_b"] = (
+        high.rolling(senkou_b_period).max() + low.rolling(senkou_b_period).min()
+    ) / 2
+    # Chikou at chart coordinate t-displacement equals today's close.
+    # Never expose close.shift(-displacement) as a trading feature.
+    out["chikou"] = close
+    out["chikou_reference_high"] = high.shift(displacement)
+    out["chikou_reference_low"] = low.shift(displacement)
+    tr = pd.concat([high-low, (high-close.shift()).abs(),
+                    (low-close.shift()).abs()], axis=1).max(axis=1)
+    # Wilder ATR: SMA seed followed by recursive smoothing.
+    atr = pd.Series(float("nan"), index=out.index)
+    if len(out) >= 14:
+        atr.iloc[13] = tr.iloc[:14].mean()
+        for i in range(14, len(out)):
+            atr.iloc[i] = (atr.iloc[i-1] * 13 + tr.iloc[i]) / 14
+    out["atr"] = atr
 
     # Kumo boundaries at each bar (uses the values that project to that bar)
-    out["kumo_top"] = out[["senkou_a", "senkou_b"]].max(axis=1)
-    out["kumo_bottom"] = out[["senkou_a", "senkou_b"]].min(axis=1)
+    out["kumo_top"] = out[["senkou_a", "senkou_b"]].max(axis=1, skipna=False)
+    out["kumo_bottom"] = out[["senkou_a", "senkou_b"]].min(axis=1, skipna=False)
 
     out["price_above_kumo"] = close > out["kumo_top"]
     out["price_below_kumo"] = close < out["kumo_bottom"]

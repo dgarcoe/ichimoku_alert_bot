@@ -83,19 +83,17 @@ def _to_yahoo_symbol(symbol: str) -> str:
     if s.endswith("=X") or "-" in s or "=" in s:
         return s
 
-    # Forex with slash: EUR/USD -> EURUSD=X
-    if "/" in s:
-        return s.replace("/", "") + "=X"
-
-    # 6-letter all-caps code that doesn't end in T  ->  forex (EURUSD -> EURUSD=X)
-    if len(s) == 6 and s.isalpha():
-        return s + "=X"
-
-    # Crypto Binance-style: BTCUSDT -> BTC-USD,  ETHUSDT -> ETH-USD
-    if s.endswith("USDT"):
-        return s[:-4] + "-USD"
-    if s.endswith("USDC"):
-        return s[:-4] + "-USD"
+    compact = s.replace("/", "")
+    for quote in ("USDT", "USDC"):
+        if compact.endswith(quote):
+            return compact[:-len(quote)] + "-USD"
+    currencies = {"EUR", "USD", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD",
+                  "CNY", "CNH", "HKD", "SGD", "NOK", "SEK", "DKK", "MXN",
+                  "ZAR", "TRY", "PLN", "BRL", "INR"}
+    if len(compact) == 6 and compact[:3] in currencies and compact[3:] in currencies:
+        return compact + "=X"
+    if "/" in s and compact.endswith("USD"):
+        return compact[:-3] + "-USD"
 
     # Fall back: assume the caller already gave a valid Yahoo ticker.
     return s
@@ -161,6 +159,9 @@ class YahooSource(DataSource):
         df = df.sort_index()
 
         if resample_rule is not None:
+            # Remove unfinished source hours before aggregation.
+            now = pd.Timestamp.now(tz="UTC")
+            df = df[df.index + pd.Timedelta(hours=1) <= now]
             df = _resample_ohlc(df, resample_rule)
 
         # Drop the still-forming bar if its timestamp looks too recent.
@@ -196,6 +197,10 @@ def _resample_ohlc(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     # label/closed='left' makes the bar timestamp mark the open time, which
     # is the convention used by Binance and by the rest of this codebase.
     out = df.resample(rule, label="left", closed="left").agg(agg)
-    return out.dropna(subset=["open", "high", "low", "close"])
+    # Require every source hour. Partial session/gap bins are intentionally
+    # excluded; synthetic UTC bars are not exchange-session candles.
+    counts = df["close"].resample(rule, label="left", closed="left").count()
+    expected = int(pd.Timedelta(rule) / pd.Timedelta(hours=1))
+    return out[counts == expected].dropna(subset=["open", "high", "low", "close"])
 
 

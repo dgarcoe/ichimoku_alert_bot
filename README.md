@@ -1,189 +1,188 @@
-# Ichimoku Chikou Breakout Telegram Bot
+# Ichimoku Chikou Breakout Alert Bot
 
-A Telegram bot that scans your watchlist of forex and crypto symbols for a very specific Ichimoku setup — **Chikou Span breakout after a Tenkan-sen / Kijun-sen cross** — and sends you a formatted alert when one prints on the most recently closed bar.
+Bot de **alertas**, sin ejecución de órdenes, para Binance spot y Yahoo Finance.
+Detecta una reversión temprana: cruce Tenkan/Kijun fuera de la nube seguido de
+ruptura Chikou. No es una estrategia de seguimiento que exija precio sobre/bajo
+la nube en la entrada. Su rentabilidad **no está validada**.
 
-No paid data feeds. No API keys beyond the Telegram bot token. Deploy with one `docker compose up -d`.
+## Estrategia exacta
 
-## The strategy, in one paragraph
+Se evalúan exclusivamente velas cerradas:
 
-The classical Ichimoku "T/K cross" on its own produces a lot of fakeouts, especially when the cross happens inside or against the Kumo. This bot only fires when **two** conditions are in sequence:
+1. LONG: Tenkan pasa de `<= Kijun` a `> Kijun`, con cierre **por debajo del
+   borde inferior** del Kumo completo. SHORT: inverso, sobre el borde superior.
+2. El cruce debe ser anterior a la entrada y tener como máximo
+   `cross_lookback_bars` velas de antigüedad. La igualdad T/K o pérdida de la
+   dirección cancela esa preparación; un nuevo cruce puede crear otra.
+3. LONG: `close[t-1] <= high[t-1-displacement]` y
+   `close[t] > high[t-displacement]`. SHORT: cruza bajo los mínimos históricos.
+4. Solo se considera la primera ruptura posterior al cruce. Si un filtro la
+   rechaza, no se rescata una ruptura posterior de esa misma preparación.
+5. Stop LONG = `min(Kijun actual, mínimo desde el cruce)` menos buffer ATR;
+   SHORT = `max(Kijun actual, máximo desde el cruce)` más buffer ATR.
+   Es el stop **más amplio**, no el más ajustado. Se descartan stops inválidos.
 
-1. A Tenkan-sen / Kijun-sen cross occurs on the wrong side of the Kumo (bullish cross below the cloud for longs; bearish cross above it for shorts) — a momentum-shift hint, not an entry.
-2. Within the next N bars, the **Chikou Span breaks past the price candles** at its own chart position (`close[t] > high[t-26]` for longs, or below `low[t-26]` for shorts). That is the entry bar.
+Estar fuera de la nube en el cruce sirve de contexto de reversión; no constituye
+una prueba independiente de tendencia previa. Tampoco se exige que Chikou esté
+libre de todas las velas intermedias: se compara la vela en su coordenada histórica.
+No se implementan confirmación multitemporal ni objetivos S/R automáticos.
 
-The stop-loss is set to the tighter of the Kijun-sen or the swing since the qualifying cross. Only closed bars are ever evaluated.
+Ichimoku usa 9/26/52 con desplazamiento 26. Kumo actual usa Senkou desplazadas;
+`projected_senkou_a/b` son valores calculados hoy y dibujados hacia delante.
+`chikou` contiene el cierre actual, para dibujarlo 26 posiciones atrás: **no**
+contiene cierres futuros. El ATR de 14 periodos usa semilla SMA y suavizado Wilder.
+No se acepta Kumo incompleto durante el calentamiento.
 
-## Project layout
-
-```
-ichimoku-bot/
-├── app/
-│   ├── main.py              # Poll loop + graceful shutdown
-│   ├── config.py            # YAML loader with ${ENV} expansion
-│   ├── scanner.py           # Orchestrates fetch → compute → detect → notify
-│   ├── state.py             # Per-bar alert dedup (JSON in /data)
-│   ├── strategies/
-│   │   ├── ichimoku.py      # Tenkan, Kijun, Senkou A/B, Chikou, Kumo
-│   │   └── signals.py       # Chikou-breakout-after-cross detector
-│   ├── data_sources/
-│   │   ├── binance_source.py   # Crypto, public REST, no auth
-│   │   └── yahoo_source.py     # Forex/stocks/futures via yfinance, no auth
-│   └── notifiers/
-│       └── telegram.py      # Bot API sendMessage
-├── config/config.yml        # Watchlist + Ichimoku + scan settings
-├── tests/                   # Unit tests for the signal detector
-├── scripts/smoke_binance.py # End-to-end smoke test against live data
-├── Dockerfile
-├── docker-compose.yml
-├── requirements.txt
-└── .env.example
-```
-
-## Prerequisites
-
-- Docker and Docker Compose (v2 — `docker compose`, not `docker-compose`)
-- A Telegram account
-
-Nothing else. No broker account, no data-vendor signup.
-
-## Quick start
-
-### 1. Create the Telegram bot
-
-1. Open Telegram and start a chat with [@BotFather](https://t.me/BotFather).
-2. Send `/newbot`, follow the prompts, and save the **bot token** it gives you.
-3. Open a chat with your new bot and send it any message (e.g. `/start`). This is required — bots cannot send you messages until you have messaged them at least once.
-4. Open a chat with [@userinfobot](https://t.me/userinfobot) and send it any message. It will reply with your **numeric chat ID**.
-
-### 2. Configure
+## Instalación
 
 ```bash
-git clone <your-repo-url> ichimoku-bot
-cd ichimoku-bot
+git clone https://github.com/dgarcoe/ichimoku_alert_bot.git
+cd ichimoku_alert_bot
 cp .env.example .env
+cp config/config.example.yml config/config.yml
 ```
 
-Edit `.env` and fill in:
-
-```
-TELEGRAM_BOT_TOKEN=123456789:AAAA...
-TELEGRAM_CHAT_IDS=123456789
-LOG_LEVEL=INFO
-```
-
-`TELEGRAM_CHAT_IDS` accepts a comma-separated list if you want the bot to notify multiple people or groups.
-
-Then edit `config/config.yml` to match your watchlist. The file ships with a sensible default (BTC, ETH, SOL on Binance and EUR/USD, GBP/USD, USD/JPY, AUD/USD on Yahoo).
-
-### 3. Run it
+Crea tu bot con BotFather, inicia una conversación con él y configura
+`TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_IDS` en `.env`. Los destinatarios pueden
+separarse con comas. No subas credenciales a Git.
 
 ```bash
-docker compose up -d
-docker compose logs -f
+docker compose up -d --build
+docker compose logs -f --tail=100
 ```
 
-You should see a startup message in Telegram listing your watchlist, then a `"no signal"` log line for each symbol every `poll_interval_seconds`. When a setup prints on a closed bar, you'll get a formatted alert like:
+Edita `config/config.yml` y reinicia para cambiar la lista de mercados. El estado
+se guarda en el volumen `/data`. El healthcheck comprueba únicamente que el
+proceso sigue vivo, no la salud de las APIs ni la entrega de alertas.
 
-```
-🟢 LONG — BTC/USDT
-Ichimoku Chikou Breakout (post T/K cross)
-
-• Timeframe: 4h
-• Source: binance
-• Bar: 2026-04-21T12:00:00+00:00
-• Entry: 71234.50
-• Stop:  70010.00  (risk ≈ 1.72%)
-• Tenkan: 70980  |  Kijun: 70420
-• Kumo: 69500 → 70800
-• Qualifying T/K cross: 2026-04-19T04:00:00+00:00
-
-Targets: next S/R or opposite side of higher-TF Kumo. Trail with Kijun-sen.
-```
-
-### 4. Updating the watchlist
-
-Edit `config/config.yml` and restart the service. The config is bind-mounted, so no rebuild is needed:
+Para ejecutar sin Docker:
 
 ```bash
-docker compose restart
+python -m pip install -r requirements.txt
+# Exporta las variables de Telegram en tu shell; Python no carga .env.
+python -m app.main --config config/config.yml
 ```
 
-## Symbol reference
-
-| Market | Source    | Format                    | Example                |
-|--------|-----------|---------------------------|------------------------|
-| Crypto | `binance` | `<BASE><QUOTE>`           | `BTCUSDT`, `ETHUSDT`   |
-| Crypto | `yahoo`   | `<BASE>-USD`              | `BTC-USD`, `ETH-USD`   |
-| Forex  | `yahoo`   | `<PAIR>=X` or `A/B` or `ABCDEF` | `EURUSD=X`, `EUR/USD`, `EURUSD` |
-| Futures | `yahoo`  | `<TICKER>=F`              | `GC=F` (gold), `CL=F` (WTI) |
-| Equity | `yahoo`   | Yahoo ticker              | `AAPL`, `TSLA`         |
-
-The Yahoo source auto-translates friendly forex forms — `"EUR/USD"` and `"EURUSD"` both become `EURUSD=X` under the hood.
-
-## Supported timeframes
-
-| Timeframe | Binance | Yahoo |
-|-----------|---------|-------|
-| `1m`      | ✅      | ✅ (last 7 days only) |
-| `5m`      | ✅      | ✅ (last 60 days only) |
-| `15m`     | ✅      | ✅ (last 60 days only) |
-| `30m`     | ✅      | ✅ (last 60 days only) |
-| `1h`      | ✅      | ✅ (last 60 days only) |
-| `4h`      | ✅      | ❌ (use `1h` or `1d`)  |
-| `1d`      | ✅      | ✅                    |
-| `1w`      | ✅      | ✅                    |
-
-The Yahoo intraday history limit is Yahoo's own, not ours. For Ichimoku you need ~100+ bars of history, which `1h` and above will always give you.
-
-## Polling and rate limits
-
-- **Binance**: the bot hits `api.binance.com/api/v3/klines`, which is rate-limited per IP but very generous (thousands of requests per minute). One request per symbol per poll is a rounding error.
-- **Yahoo**: yfinance scrapes Yahoo's public chart endpoints. There is no officially published rate limit, but aggressive polling (< 1 minute) can get you temporarily throttled. The default `poll_interval_seconds: 300` is conservative.
-
-## How alerts are deduplicated
-
-The dedup key is `{source}:{symbol}:{timeframe}:{bar_time}:{side}`. Once an alert is sent for a given bar, it's written to `/data/seen_signals.json` (a Docker named volume), so restarts don't re-fire old alerts. If you want to force re-alerting (e.g. after tweaking the strategy), just delete that file:
+Diagnóstico **sin Telegram ni escritura de estado** (sí consulta precios):
 
 ```bash
-docker compose down
-docker volume rm ichimoku-bot_ichimoku-state
-docker compose up -d
+LOG_LEVEL=DEBUG python -m app.main --config config/config.example.yml --once --dry-run
 ```
 
-## Tuning knobs
+## Configuración y filtros
 
-All in `config/config.yml`:
-
-| Setting | What it does |
+| Parámetro | Función |
 |---|---|
-| `ichimoku.tenkan / kijun / senkou_b / displacement` | Standard Ichimoku periods. Leave at 9/26/52/26 unless you know why. |
-| `scan.cross_lookback_bars` | How far back to look for the qualifying T/K cross. 60 is comfortable. Lower it (e.g. 30) to only catch very recent crosses. |
-| `scan.history_bars` | How many closed bars to fetch per scan. Must exceed `senkou_b + displacement` by a healthy margin. 200 is safe. |
-| `scan.poll_interval_seconds` | How often to re-scan the whole watchlist. For a 1d timeframe, 1800 or 3600 is plenty. For 1h, 300 is typical. |
-| `scan.max_signal_age_seconds` | Skip alerts whose bar closed more than this many seconds ago. Prevents stale notifications after a (re)start — e.g. on 4h with the default 600s, a signal on a bar that closed at 04:00 won't fire if the bot wakes up at 06:22. Defaults to `2 × poll_interval_seconds`. |
+| `ichimoku.*` | Periodos positivos del indicador |
+| `scan.history_bars` | Al menos `max(periodos) + displacement + cross_lookback + 1`; Binance admite hasta 999 |
+| `scan.cross_lookback_bars` | Caducidad del cruce, 60 por defecto |
+| `scan.poll_interval_seconds` | Frecuencia de consulta; ejemplo: 60 s |
+| `scan.max_signal_age_seconds` | Antigüedad máxima desde cierre; ejemplo: 600 s |
+| `strategy.min_breakout_atr` | Separación mínima Chikou/precio histórico, en ATR |
+| `strategy.stop_buffer_atr` | Margen adicional del stop, en ATR |
+| `strategy.max_stop_pct` | Distancia máxima del stop respecto al cierre, en porcentaje |
+| `strategy.max_kijun_distance_atr` | Evita entradas excesivamente alejadas de Kijun |
+| `strategy.require_price_outside_cloud` | LONG sobre Kumo actual, SHORT bajo Kumo actual en la ruptura |
+| `strategy.require_projected_cloud` | Exige nube proyectada a favor |
 
-## Running the tests
+Los filtros numéricos en cero y booleanos en `false` están desactivados. No se
+presentan umbrales optimizados: endurecer filtros reduce oportunidades, pero no
+asegura mayor expectativa. Confirmar sobre la nube en la misma ruptura no equivale
+a esperar una entrada posterior sobre la nube.
+
+El precio de la alerta es el **cierre de señal**, no una ejecución garantizada.
+La distancia al stop es riesgo de precio; no es porcentaje de pérdida de tu cuenta.
+El bot no calcula apalancamiento ni tamaño de posición.
+
+## Fuentes de datos
+
+| Fuente | Símbolos | Timeframes |
+|---|---|---|
+| Binance spot | `BTCUSDT`, `BTC/USDT` | 1m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 1w |
+| Yahoo | `EURUSD=X`, `EUR/USD`, `AAPL`, `BTC-USD`, `GC=F` | 1m, 5m, 15m, 30m, 1h, 1d, 1w |
+| Yahoo sintético | Mismos símbolos | 2h, 4h, 6h, 8h, 12h agregados desde 1h |
+
+Binance filtra usando `close_time`; no elimina incondicionalmente la última vela.
+No se usan precios de perpetuos: una señal spot no modela basis, funding o
+liquidación de futuros. `BTCUSDT` en Yahoo se convierte a `BTC-USD`, otro mercado.
+
+Yahoo sintético agrega horas completas en bloques UTC y descarta bloques con
+horas ausentes. **No está ajustado a sesiones bursátiles**, por lo que descarta
+sesiones parciales y puede omitir datos válidos de acciones. Los cierres Yahoo
+nativos se estiman como apertura + duración: diarios/semanales de bolsas pueden
+retrasarse respecto al cierre real. Para acciones con necesidades de precisión
+intradiaria, hace falta integrar un calendario de mercado. Los precios no están
+ajustados por splits (`auto_adjust=False`); no uses esos históricos para evaluar
+acciones con operaciones corporativas sin normalizarlos antes.
+
+OHLC inválidos, duplicados, desordenados o no finitos se rechazan. No se rellenan
+huecos con precios inventados. Las ventanas del indicador cuentan velas recibidas,
+no tiempo transcurrido. Retrasos del proveedor o un periodo de caída pueden hacer
+que una señal caduque. Se examina la última vela, sin recuperar todas las señales
+intermedias perdidas. Ajusta el margen de antigüedad al proveedor.
+
+## Entrega y persistencia
+
+Una señal solo se marca enviada tras respuesta HTTP 200 con `ok: true` de Telegram.
+Cada destinatario confirmado se persiste por separado; el siguiente ciclo reintenta
+solo los pendientes mientras la señal siga vigente. No se imprimen tokens, URLs
+de Telegram ni cuerpos de error en los logs de entrega.
+
+El estado JSON conserva orden de inserción y un máximo de 5000 claves, en memoria
+y disco. Se reemplaza de forma atómica; admite rutas sin directorio. Ejecuta una
+sola instancia por archivo de estado. Los errores de escritura se registran y un
+reinicio podría repetir mensajes. También puede haber duplicados si Telegram
+acepta el mensaje pero la respuesta se pierde: no hay entrega exactamente una vez.
+
+## Backtest offline
+
+CSV: `timestamp,open,high,low,close[,volume]`, fechas UTC ascendentes, precios
+positivos y solo velas cerradas. Usa un histórico suficientemente largo con
+calentamiento anterior al periodo de evaluación.
 
 ```bash
-pip install -r requirements.txt pytest
-python -m pytest tests/ -v
+python -m app.backtest BTCUSDT-1h.csv \
+  --config config/config.example.yml \
+  --fee-bps 10 --slippage-bps 5 --reward-r 2 \
+  --max-holding-bars 100 --test-start 2025-01-01 \
+  --trades-csv trades.csv
 ```
 
-The test suite builds a synthetic downtrend → base → rally series that is textbook for the strategy, and asserts that `detect_signal()` fires a long on the breakout bar.
+Modelo reproducible:
 
-There is also a smoke test that calls the real Binance API:
+- Señal al cierre, entrada en la apertura siguiente con deslizamiento adverso.
+- Una posición por símbolo; sin reinversión, apalancamiento ni piramidación.
+- Stop inicial fijo, objetivo de múltiplo R; no trailing Kijun automático.
+- Stop prioritario si stop y objetivo se tocan en una vela. Los gaps adversos al
+  stop ejecutan a apertura con deslizamiento. Objetivos limitados a su precio.
+- Comisiones en entrada y salida; slippage en entrada y salidas de mercado/stop.
+- Cierre por tiempo o fin de datos; costes de funding, préstamo y spread no modelados.
+- Métricas: número de operaciones, acierto neto, R neto, expectativa R, profit
+  factor y drawdown **de operaciones cerradas** en R. No equivale a drawdown
+  intraposición o de cartera. Profit factor es `null` si no hay pérdidas.
+- `--test-start` conserva calentamiento pero no abre operaciones antes del corte.
+
+Protocolo recomendado: separar cronológicamente diseño, validación y prueba;
+comparar la base corregida y cada filtro individual; incluir mercados laterales,
+alcistas y bajistas, varios activos y costes superiores a los esperados. Congelar
+parámetros antes del periodo de prueba. Examinar número de operaciones, exposición,
+concentración por activo y estabilidad, no solo acierto. Este cambio **no incluye
+resultados de rentabilidad sobre históricos reales**.
+
+## Pruebas
 
 ```bash
-python scripts/smoke_binance.py
+python -m pip install -r requirements.txt pytest
+python -m pytest -q
 ```
 
-## Caveats
+Pruebas offline con HTTP simulado: señales simétricas, cruces inválidos, consumo
+único, filtros, ausencia de información futura, OHLC inválidos, velas cerradas,
+resampling, deduplicación, entrega parcial y costes del backtest. CI verifica
+Python 3.11/3.12 y construye la imagen Docker.
 
-- **This bot does not trade.** It sends alerts. Hooking it up to a broker is deliberately out of scope — that's a very different risk surface.
-- **Signal ≠ guaranteed win.** Ichimoku is a trend-following framework; in range-bound markets this setup will chop. The video's own advice applies: skip the setup when the Chikou is stuck sideways inside past price.
-- **Yahoo forex data is delayed** (usually a few minutes on intraday, end-of-day on `1d`). This is fine for 1h and higher timeframes but don't expect tick-level precision.
-- **Timezone**: all timestamps are UTC internally. Set `TZ` in `.env` (defaults to `Europe/Madrid`) if you want log lines in a specific local time.
+## Referencias técnicas
 
-## License
-
-MIT.
+- [Binance market data](https://developers.binance.com/docs/binance-spot-api-docs/rest-api/market-data-endpoints)
+- [Telegram Bot API](https://core.telegram.org/bots/api#making-requests)
+- [Ichimoku Cloud — TradingView](https://www.tradingview.com/support/solutions/43000589152-ichimoku-cloud/)
